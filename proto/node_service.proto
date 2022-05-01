@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package node_service;
+
+service NodeApi {
+    rpc AddBlock (AddBlockRequest) returns (AddBlockResponse);
+    rpc GetBlockchain (GetBlockchainRequest) returns (GetBlockchainResponse);
+    rpc MineBlock (MineBlockRequest) returns (MineBlockResponse);
+    rpc RegisterNode (RegisterNodeRequest) returns (RegisterNodeResponse);
+}
+
+message AddBlockRequest {
+    Block block = 1;
+}
+
+message AddBlockResponse {
+    bool added = 1;
+}
+
+message GetBlockchainRequest {}
+
+message GetBlockchainResponse {
+    repeated Block blocks = 1;
+}
+
+message MineBlockRequest {
+    string data = 1;
+}
+
+message MineBlockResponse {
+    Block block = 1;
+}
+
+message RegisterNodeRequest {
+    string peer_port = 1;
+}
+
+message RegisterNodeResponse {}
+
+message Block {
+    int32 index = 1;
+    uint64 timestamp = 2;
+    string data = 3;
+    string hash = 4;
+    string prev_hash = 5;
+}
