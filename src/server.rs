@@ -1,5 +1,8 @@
 mod blockchain;
 
+use std::net::TcpListener;
+use std::time::Duration;
+
 use node_service::node_api_client::NodeApiClient;
 use node_service::node_api_server::{NodeApi, NodeApiServer};
 use node_service::{
@@ -7,7 +10,6 @@ use node_service::{
     MineBlockRequest, MineBlockResponse, RegisterNodeRequest, RegisterNodeResponse,
 };
 use parking_lot::FairMutex;
-use structopt::StructOpt;
 use tonic::transport::Channel;
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -95,6 +97,19 @@ impl NodeApi for NodeServer {
 }
 
 impl NodeServer {
+    async fn new(mut peer_clients: Vec<NodeApiClient<Channel>>) -> Self {
+        let get_blockchain_response = peer_clients[0]
+            .get_blockchain(Request::new(GetBlockchainRequest {}))
+            .await
+            .expect("Couldn't retrieve blockchain!")
+            .into_inner();
+
+        Self {
+            blockchain: FairMutex::new(Blockchain::new(get_blockchain_response.blocks)),
+            peers: FairMutex::new(peer_clients),
+        }
+    }
+
     async fn broadcast_block_to_peers(block: Block, peers: Vec<NodeApiClient<Channel>>) {
         for mut peer in peers {
             println!("Broadcasting {:?} to {:?}", block, peer);
@@ -105,44 +120,70 @@ impl NodeServer {
                 .await;
         }
     }
-}
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "example", about = "An example of StructOpt usage.")]
-struct Opt {
-    #[structopt(short = "p", long = "port", default_value = "5150")]
-    port: String,
-
-    #[structopt(long = "peer_port", default_value = "")]
-    peer_port: String,
+    async fn register_node_with_peers(
+        available_port: u16,
+        peer_clients: Vec<NodeApiClient<Channel>>,
+    ) {
+        for mut client in peer_clients {
+            let _ = client
+                .register_node(Request::new(RegisterNodeRequest {
+                    peer_port: available_port.to_string(),
+                }))
+                .await
+                .expect("Couldn't register node with peer.")
+                .into_inner();
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let opt = Opt::from_args();
+    let mut peer_ports = Vec::new();
+    let available_port = (8000..9000)
+        .find(|port| match TcpListener::bind(("127.0.0.1", *port)) {
+            Ok(_) => true,
+            Err(_) => {
+                peer_ports.push(*port);
+                false
+            }
+        })
+        .expect("Unable to find available port!");
 
-    let port_no = opt.port;
-    let peer_port = opt.peer_port;
+    let mut peer_clients = Vec::new();
+    for peer_port in peer_ports {
+        let client = NodeApiClient::connect(format!("http://127.0.0.1:{}", peer_port))
+            .await
+            .expect("Couldn't connect to client!");
+        peer_clients.push(client);
+    }
 
-    let node_server = if !peer_port.is_empty() {
-        let mut client = NodeApiClient::connect(format!("http://127.0.0.1:{}", peer_port)).await?;
-        let get_blockchain_response = client
-            .get_blockchain(Request::new(GetBlockchainRequest {}))
-            .await?
-            .into_inner();
-        NodeServer {
-            blockchain: FairMutex::new(Blockchain::new(get_blockchain_response.blocks)),
-            peers: FairMutex::new(vec![client]),
-        }
+    let node_server = if peer_clients.len() > 0 {
+        NodeServer::new(peer_clients.clone()).await
     } else {
         NodeServer::default()
     };
 
-    let addr = format!("127.0.0.1:{}", port_no).parse()?;
-    Server::builder()
+    let addr = format!("127.0.0.1:{}", available_port).parse()?;
+    let future = Server::builder()
         .add_service(NodeApiServer::new(node_server))
-        .serve(addr)
-        .await?;
+        .serve(addr);
+
+    println!(
+        "Node running on 127.0.0.1:{} with {} peers.",
+        available_port,
+        peer_clients.len()
+    );
+
+    if peer_clients.len() > 0 {
+        tokio::spawn(async move {
+            println!("Delaying registration of node with peers for 5 seconds while servers starts.");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            NodeServer::register_node_with_peers(available_port, peer_clients.clone()).await;
+        });
+    }
+
+    future.await?;
 
     Ok(())
 }
