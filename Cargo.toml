@@ -9,9 +9,10 @@ edition = "2021"
 name = "node-server"
 path = "src/server.rs"
 
-[[bin]]
-name = "node-client"
-path = "src/client.rs"
+# TODO: Implement a Client
+# [[bin]]
+# name = "node-client"
+# path = "src/client.rs"
 
 [dependencies]
 tonic = "0.7"

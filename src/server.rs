@@ -1,6 +1,5 @@
 mod blockchain;
 
-use std::net::TcpListener;
 use std::time::Duration;
 
 use node_service::node_api_client::NodeApiClient;
@@ -10,6 +9,7 @@ use node_service::{
     MineBlockRequest, MineBlockResponse, RegisterNodeRequest, RegisterNodeResponse,
 };
 use parking_lot::FairMutex;
+use std::net::TcpListener;
 use tonic::transport::Channel;
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -21,6 +21,7 @@ pub mod node_service {
 
 #[derive(Debug, Default)]
 pub struct NodeServer {
+    port: u16,
     blockchain: FairMutex<Blockchain>,
     peers: FairMutex<Vec<NodeApiClient<Channel>>>,
 }
@@ -97,17 +98,51 @@ impl NodeApi for NodeServer {
 }
 
 impl NodeServer {
-    async fn new(mut peer_clients: Vec<NodeApiClient<Channel>>) -> Self {
-        let get_blockchain_response = peer_clients[0]
-            .get_blockchain(Request::new(GetBlockchainRequest {}))
-            .await
-            .expect("Couldn't retrieve blockchain!")
-            .into_inner();
+    async fn new(port: u16, peer_ports: Vec<u16>) -> Self {
+        let mut peer_clients = Vec::new();
+        for peer_port in peer_ports.clone() {
+            let client = NodeApiClient::connect(format!("http://127.0.0.1:{}", peer_port))
+                .await
+                .expect("Couldn't connect to server!");
+            peer_clients.push(client);
+        }
+
+        let blockchain = if peer_ports.len() > 0 {
+            let get_blockchain_response = peer_clients[0]
+                .get_blockchain(Request::new(GetBlockchainRequest {}))
+                .await
+                .expect("Couldn't retrieve blockchain!")
+                .into_inner();
+
+            Blockchain::new_with_existing_chain(get_blockchain_response.blocks)
+        } else {
+            Blockchain::default()
+        };
 
         Self {
-            blockchain: FairMutex::new(Blockchain::new(get_blockchain_response.blocks)),
+            port,
+            blockchain: FairMutex::new(blockchain),
             peers: FairMutex::new(peer_clients),
         }
+    }
+
+    fn register_node_with_peers(&self) {
+        let peers = self.peers.lock().clone();
+        let port = self.port;
+        tokio::spawn(async move {
+            println!("Delaying registration of node with peers for 5 seconds while server starts.");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            for mut client in peers.into_iter() {
+                let _ = client
+                    .register_node(Request::new(RegisterNodeRequest {
+                        peer_port: port.to_string(),
+                    }))
+                    .await
+                    .expect("Couldn't register node with peer.")
+                    .into_inner();
+            }
+        });
     }
 
     async fn broadcast_block_to_peers(block: Block, peers: Vec<NodeApiClient<Channel>>) {
@@ -120,27 +155,34 @@ impl NodeServer {
                 .await;
         }
     }
-
-    async fn register_node_with_peers(
-        available_port: u16,
-        peer_clients: Vec<NodeApiClient<Channel>>,
-    ) {
-        for mut client in peer_clients {
-            let _ = client
-                .register_node(Request::new(RegisterNodeRequest {
-                    peer_port: available_port.to_string(),
-                }))
-                .await
-                .expect("Couldn't register node with peer.")
-                .into_inner();
-        }
-    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut peer_ports = Vec::new();
-    let available_port = (8000..9000)
+    let available_port = find_and_filter_ports(&mut peer_ports);
+
+    let server = NodeServer::new(available_port, peer_ports.clone()).await;
+    server.register_node_with_peers();
+
+    let addr = format!("127.0.0.1:{}", available_port).parse()?;
+    let future = Server::builder()
+        .add_service(NodeApiServer::new(server))
+        .serve(addr);
+
+    println!(
+        "Node running on 127.0.0.1:{} with {} peers.",
+        available_port,
+        peer_ports.len()
+    );
+
+    future.await?;
+
+    Ok(())
+}
+
+fn find_and_filter_ports(peer_ports: &mut Vec<u16>) -> u16 {
+    (8000..9000)
         .find(|port| match TcpListener::bind(("127.0.0.1", *port)) {
             Ok(_) => true,
             Err(_) => {
@@ -148,42 +190,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 false
             }
         })
-        .expect("Unable to find available port!");
-
-    let mut peer_clients = Vec::new();
-    for peer_port in peer_ports {
-        let client = NodeApiClient::connect(format!("http://127.0.0.1:{}", peer_port))
-            .await
-            .expect("Couldn't connect to client!");
-        peer_clients.push(client);
-    }
-
-    let node_server = if peer_clients.len() > 0 {
-        NodeServer::new(peer_clients.clone()).await
-    } else {
-        NodeServer::default()
-    };
-
-    let addr = format!("127.0.0.1:{}", available_port).parse()?;
-    let future = Server::builder()
-        .add_service(NodeApiServer::new(node_server))
-        .serve(addr);
-
-    println!(
-        "Node running on 127.0.0.1:{} with {} peers.",
-        available_port,
-        peer_clients.len()
-    );
-
-    if peer_clients.len() > 0 {
-        tokio::spawn(async move {
-            println!("Delaying registration of node with peers for 5 seconds while servers starts.");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            NodeServer::register_node_with_peers(available_port, peer_clients.clone()).await;
-        });
-    }
-
-    future.await?;
-
-    Ok(())
+        .expect("Unable to find available port!")
 }

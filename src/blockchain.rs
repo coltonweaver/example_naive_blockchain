@@ -24,7 +24,7 @@ impl Default for Blockchain {
 
 impl Blockchain {
     /// Used if this is not the first node in the network
-    pub fn new(blocks: Vec<Block>) -> Self {
+    pub fn new_with_existing_chain(blocks: Vec<Block>) -> Self {
         Self { blocks }
     }
 
